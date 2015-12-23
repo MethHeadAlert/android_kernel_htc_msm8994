@@ -674,5 +674,7 @@ source "lib/Kconfig"
 
 source "arch/arm64/mm/Kconfig"
 
+source "arch/arm64/hotplug/INTELLIPLUG/Kconfig"
+
 config BCMDHD_GPIO
        bool "Driver to init gpio"
