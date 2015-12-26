@@ -37,7 +37,6 @@
 #define DEFAULT_DEF_TIMER_JIFFIES 5
 
 struct notifier_block freq_transition;
-struct notifier_block policy_change;
 struct notifier_block cpu_hotplug;
 
 struct cpu_load_data {
@@ -53,6 +52,22 @@ struct cpu_load_data {
 };
 
 static DEFINE_PER_CPU(struct cpu_load_data, cpuload);
+
+unsigned int get_rq_info(void)
+{
+	unsigned long flags = 0;
+	unsigned int rq = 0;
+
+	spin_lock_irqsave(&rq_lock, flags);
+
+	rq = rq_info.rq_avg;
+	rq_info.rq_avg = 0;
+
+	spin_unlock_irqrestore(&rq_lock, flags);
+
+	return rq;
+}
+EXPORT_SYMBOL(get_rq_info);
 
 
 static int update_average_load(unsigned int freq, unsigned int cpu)
@@ -151,22 +166,6 @@ static void update_related_cpus(void)
 		cpumask_copy(this_cpu->related_cpus, cpu_policy.cpus);
 	}
 }
-
-static int policy_change_handler(struct notifier_block *nb,
-			unsigned long val, void *data)
-{
-	struct cpufreq_policy *policy = data;
-	switch (val) {
-		case CPUFREQ_NOTIFY:
-		{
-			struct cpu_load_data *pcpu = &per_cpu(cpuload, policy->cpu);
-			pcpu->policy_max = policy->max;
-			break;
-		}
-	}
-	return NOTIFY_OK;
-}
-
 static int cpu_hotplug_handler(struct notifier_block *nb,
 			unsigned long val, void *data)
 {
@@ -385,12 +384,9 @@ static int __init msm_rq_stats_init(void)
 		cpumask_copy(pcpu->related_cpus, cpu_policy.cpus);
 	}
 	freq_transition.notifier_call = cpufreq_transition_handler;
-	policy_change.notifier_call = policy_change_handler;
 	cpu_hotplug.notifier_call = cpu_hotplug_handler;
 	cpufreq_register_notifier(&freq_transition,
 					CPUFREQ_TRANSITION_NOTIFIER);
-	cpufreq_register_notifier(&policy_change,
-					CPUFREQ_POLICY_NOTIFIER);
 	register_hotcpu_notifier(&cpu_hotplug);
 
 	return ret;

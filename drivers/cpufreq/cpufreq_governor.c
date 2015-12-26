@@ -35,15 +35,23 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 	struct cpu_dbs_common_info *cdbs = dbs_data->cdata->get_cpu_cdbs(cpu);
 	struct od_dbs_tuners *od_tuners = dbs_data->tuners;
 	struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
+	struct ex_dbs_tuners *ex_tuners = dbs_data->tuners;
 	struct cpufreq_policy *policy;
+	unsigned int sampling_rate;
 	unsigned int max_load = 0;
 	unsigned int ignore_nice;
 	unsigned int j;
 
-	if (dbs_data->cdata->governor == GOV_ONDEMAND)
+	if (dbs_data->cdata->governor == GOV_ONDEMAND) {
 		ignore_nice = od_tuners->ignore_nice_load;
-	else
+    } else if (dbs_data->cdata->governor == GOV_ELEMENTALX) {
+		sampling_rate = ex_tuners->sampling_rate;
+		ignore_nice = ex_tuners->ignore_nice_load;
+	} else {
+		sampling_rate = cs_tuners->sampling_rate;
 		ignore_nice = cs_tuners->ignore_nice_load;
+		
+	}
 
 	policy = cdbs->cur_policy;
 
@@ -57,12 +65,6 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 
 		j_cdbs = dbs_data->cdata->get_cpu_cdbs(j);
 
-		/*
-		 * For the purpose of ondemand, waiting for disk IO is
-		 * an indication that you're performance critical, and
-		 * not that the system is actually idle. So do not add
-		 * the iowait time to the cpu idle time.
-		 */
 		if (dbs_data->cdata->governor == GOV_ONDEMAND)
 			io_busy = od_tuners->io_is_busy;
 		cur_idle_time = get_cpu_idle_time(j, &cur_wall_time, io_busy);
@@ -81,10 +83,6 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 
 			cur_nice = kcpustat_cpu(j).cpustat[CPUTIME_NICE] -
 					 cdbs->prev_cpu_nice;
-			/*
-			 * Assumption: nice time between sampling periods will
-			 * be less than 2^32 jiffies for 32 bit sys
-			 */
 			cur_nice_jiffies = (unsigned long)
 					cputime64_to_jiffies64(cur_nice);
 
@@ -123,13 +121,6 @@ void gov_queue_work(struct dbs_data *dbs_data, struct cpufreq_policy *policy,
 		return;
 
 	if (!all_cpus) {
-		/*
-		 * Use raw_smp_processor_id() to avoid preemptible warnings.
-		 * We know that this is only called with all_cpus == false from
-		 * works that have been queued with *_work_on() functions and
-		 * those works are canceled during CPU_DOWN_PREPARE so they
-		 * can't possibly run on any other CPU.
-		 */
 		__gov_queue_work(raw_smp_processor_id(), dbs_data, delay);
 	} else {
 		for_each_cpu(i, policy->cpus)
@@ -150,7 +141,6 @@ static inline void gov_cancel_work(struct dbs_data *dbs_data,
 	}
 }
 
-/* Will return if we need to evaluate cpu load again or not */
 bool need_load_eval(struct cpu_dbs_common_info *cdbs,
 		unsigned int sampling_rate)
 {
@@ -175,6 +165,9 @@ static void set_sampling_rate(struct dbs_data *dbs_data,
 	if (dbs_data->cdata->governor == GOV_CONSERVATIVE) {
 		struct cs_dbs_tuners *cs_tuners = dbs_data->tuners;
 		cs_tuners->sampling_rate = sampling_rate;
+	} else if (dbs_data->cdata->governor == GOV_ELEMENTALX) {
+		struct ex_dbs_tuners *ex_tuners = dbs_data->tuners;
+		ex_tuners->sampling_rate = sampling_rate;
 	} else {
 		struct od_dbs_tuners *od_tuners = dbs_data->tuners;
 		od_tuners->sampling_rate = sampling_rate;
@@ -187,9 +180,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	struct dbs_data *dbs_data;
 	struct od_cpu_dbs_info_s *od_dbs_info = NULL;
 	struct cs_cpu_dbs_info_s *cs_dbs_info = NULL;
+	struct ex_cpu_dbs_info_s *ex_dbs_info = NULL;
 	struct od_ops *od_ops = NULL;
 	struct od_dbs_tuners *od_tuners = NULL;
 	struct cs_dbs_tuners *cs_tuners = NULL;
+	struct ex_dbs_tuners *ex_tuners = NULL;
 	struct cpu_dbs_common_info *cpu_cdbs;
 	unsigned int sampling_rate, latency, ignore_nice, j, cpu = policy->cpu;
 	int io_busy = 0;
@@ -220,7 +215,12 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 
 		dbs_data->cdata = cdata;
 		dbs_data->usage_count = 1;
-		rc = cdata->init(dbs_data);
+
+		if (cdata->governor == GOV_ELEMENTALX)
+			rc = cdata->init_ex(dbs_data, policy);
+		else
+			rc = cdata->init(dbs_data);
+
 		if (rc) {
 			pr_err("%s: POLICY_INIT: init() failed\n", __func__);
 			kfree(dbs_data);
@@ -295,6 +295,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		cs_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
 		sampling_rate = cs_tuners->sampling_rate;
 		ignore_nice = cs_tuners->ignore_nice_load;
+	} else if (dbs_data->cdata->governor == GOV_ELEMENTALX) {
+		ex_tuners = dbs_data->tuners;
+		ex_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
+		sampling_rate = ex_tuners->sampling_rate;
+		ignore_nice = ex_tuners->ignore_nice_load;
 	} else {
 		od_tuners = dbs_data->tuners;
 		od_dbs_info = dbs_data->cdata->get_cpu_dbs_info_s(cpu);
@@ -332,6 +337,9 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 			cs_dbs_info->down_skip = 0;
 			cs_dbs_info->enable = 1;
 			cs_dbs_info->requested_freq = policy->cur;
+		} else if (dbs_data->cdata->governor == GOV_ELEMENTALX) {
+			ex_dbs_info->down_floor = 0;
+			ex_dbs_info->enable = 1;
 		} else {
 			od_dbs_info->rate_mult = 1;
 			od_dbs_info->sample_type = OD_NORMAL_SAMPLE;
@@ -351,6 +359,9 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		if (dbs_data->cdata->governor == GOV_CONSERVATIVE)
 			cs_dbs_info->enable = 0;
 
+		if (dbs_data->cdata->governor == GOV_ELEMENTALX)
+			ex_dbs_info->enable = 0;
+
 		gov_cancel_work(dbs_data, policy);
 
 		mutex_lock(&dbs_data->mutex);
@@ -363,13 +374,15 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 
 	case CPUFREQ_GOV_LIMITS:
 		mutex_lock(&cpu_cdbs->timer_mutex);
-		if (policy->max < cpu_cdbs->cur_policy->cur)
-			__cpufreq_driver_target(cpu_cdbs->cur_policy,
-					policy->max, CPUFREQ_RELATION_H);
-		else if (policy->min > cpu_cdbs->cur_policy->cur)
-			__cpufreq_driver_target(cpu_cdbs->cur_policy,
-					policy->min, CPUFREQ_RELATION_L);
-		dbs_check_cpu(dbs_data, cpu);
+		if (cpu_cdbs->cur_policy) {
+			if (policy->max < cpu_cdbs->cur_policy->cur)
+				__cpufreq_driver_target(cpu_cdbs->cur_policy,
+						policy->max, CPUFREQ_RELATION_H);
+			else if (policy->min > cpu_cdbs->cur_policy->cur)
+				__cpufreq_driver_target(cpu_cdbs->cur_policy,
+						policy->min, CPUFREQ_RELATION_L);
+			dbs_check_cpu(dbs_data, cpu);
+		}
 		mutex_unlock(&cpu_cdbs->timer_mutex);
 		break;
 	}
