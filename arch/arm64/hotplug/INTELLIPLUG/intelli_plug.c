@@ -133,11 +133,11 @@ static unsigned int nr_run_thresholds_disable[] = {
 };
 
 static unsigned int *nr_run_profiles[] = {
+	nr_run_thresholds_eco,
+	nr_run_thresholds_eco_extreme,
 	nr_run_thresholds_balance,
 	nr_run_thresholds_performance,
 	nr_run_thresholds_conservative,
-	nr_run_thresholds_eco,
-	nr_run_thresholds_eco_extreme,
 	nr_run_thresholds_disable,
 };
 
